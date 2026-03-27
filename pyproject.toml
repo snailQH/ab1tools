@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ab1tools"
+version = "2.0.0"
+description = "Comprehensive toolkit for AB1 chromatogram files: generate from any NGS platform, visualize, analyze variants (SDVC), convert, compare, trim, and extract regions"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = ["ab1", "sanger", "chromatogram", "ngs", "nanopore", "illumina", "variant-calling", "bioinformatics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "pysam>=0.21",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "biopython>=1.81",
+]
+
+[project.urls]
+Homepage = "https://github.com/snailQH/ab1tools"
+Repository = "https://github.com/snailQH/ab1tools"
+
+[project.scripts]
+ab1tools = "ab1tools.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ab1tools*"]
+
+[project.optional-dependencies]
+dev = ["pytest"]

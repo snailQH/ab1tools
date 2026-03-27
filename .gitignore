@@ -1,0 +1,26 @@
+# Legacy output directories
+output/
+output_smart/
+output_fromseq_fastq/
+output_fromseq_fasta/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

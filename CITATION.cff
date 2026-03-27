@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use ab1tools in your research, please cite it as below."
+type: software
+title: "ab1tools: a comprehensive toolkit for Sanger chromatogram generation, analysis, and NGS bridging"
+version: 2.0.0
+date-released: 2026-03-27
+url: "https://github.com/snailQH/ab1tools"
+repository-code: "https://github.com/snailQH/ab1tools"
+license: MIT
+authors:
+  - family-names: Li
+    given-names: Qinghui
+    email: leeqhui@gmail.com
+    orcid: "https://orcid.org/0000-0002-8494-0547"
+    affiliation: "Shanghai ImmunoBiotech Co., Ltd.; AmpSeq, Gaithersburg, MD, USA"
+keywords:
+  - ab1
+  - sanger-sequencing
+  - chromatogram
+  - next-generation-sequencing
+  - nanopore
+  - variant-calling
+  - bioinformatics
+  - signal-processing
