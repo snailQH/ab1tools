@@ -110,13 +110,36 @@ def detect_sequence_format(file_path):
 def read_sequence(file_path):
     """Read a sequence from a FASTA or FASTQ file (auto-detected).
 
+    For single-record files. Raises error if multiple records found.
+    Use read_sequences() for multi-record files.
+
     Returns:
         seq: str of the sequence
         record: Bio.SeqRecord
     """
     fmt = detect_sequence_format(file_path)
-    record = SeqIO.read(file_path, fmt)
-    return str(record.seq), record
+    records = list(SeqIO.parse(file_path, fmt))
+    if len(records) == 0:
+        raise ValueError(f"No sequences found in {file_path}")
+    if len(records) > 1:
+        # Return first record but warn — caller should use read_sequences()
+        import warnings
+        warnings.warn(f"{file_path} contains {len(records)} records. "
+                      f"Using first record only. Use read_sequences() for all records.")
+    return str(records[0].seq), records[0]
+
+
+def read_sequences(file_path):
+    """Read all sequences from a multi-record FASTA or FASTQ file.
+
+    Returns:
+        list of (seq_str, SeqRecord) tuples
+    """
+    fmt = detect_sequence_format(file_path)
+    records = list(SeqIO.parse(file_path, fmt))
+    if len(records) == 0:
+        raise ValueError(f"No sequences found in {file_path}")
+    return [(str(r.seq), r) for r in records]
 
 
 def sequence_to_base_frequencies(seq):

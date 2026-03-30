@@ -156,49 +156,72 @@ def convert_sequence(input_path, output_dir, sample_name=None,
                      phasing=DEFAULT_PHASING, decay=DEFAULT_DECAY,
                      no_plot=False, asymmetry=1.0, dye_scaling=None,
                      crosstalk=0.0, baseline_drift=0.0, smooth=0.0):
-    """Convert a single FASTA/FASTQ file to AB1 + PNG (no BAM required).
+    """Convert FASTA/FASTQ file(s) to AB1 + PNG (no BAM required).
 
-    Generates clean single-peak traces from the sequence directly.
+    Supports multi-record files: if the input contains multiple sequences
+    (e.g., multi-contig assembly from Flye/Canu/SPAdes), generates one AB1
+    per record. Single-record files produce one AB1 as before.
     """
-    if sample_name is None:
-        sample_name = os.path.splitext(os.path.basename(input_path))[0]
+    from ab1tools.signal import read_sequences
 
     os.makedirs(output_dir, exist_ok=True)
 
-    ab1_path = os.path.join(output_dir, f"{sample_name}.ab1")
-    png_path = os.path.join(output_dir, f"{sample_name}.png")
+    # Read all sequences (auto-detects FASTA or FASTQ)
+    print(f"  Reading sequences: {input_path}")
+    records = read_sequences(input_path)
+    n_records = len(records)
+    print(f"  Found {n_records} sequence(s)")
 
-    # Read sequence (auto-detects FASTA or FASTQ)
-    print(f"  Reading sequence: {input_path}")
-    seq, record = read_sequence(input_path)
-    print(f"  Sequence length: {len(seq)} bp")
+    all_ab1_paths = []
+    all_png_paths = []
 
-    # Generate base frequencies from sequence (100% per base, no mixed signals)
-    base_freq = sequence_to_base_frequencies(seq)
+    for idx, (seq, record) in enumerate(records):
+        # Determine name for this record
+        if n_records == 1:
+            # Single record: use --name or filename
+            rec_name = sample_name or os.path.splitext(os.path.basename(input_path))[0]
+        else:
+            # Multi-record: use record ID or contig_N
+            rec_id = record.id if record.id and record.id != "unknown" else f"contig_{idx+1}"
+            if sample_name:
+                rec_name = f"{sample_name}_{rec_id}"
+            else:
+                rec_name = rec_id
 
-    # Generate traces
-    print(f"  Generating traces (spacing={spacing}, sigma={sigma})")
-    traces, base_calls, peak_positions, quality_scores = generate_traces(
-        base_freq, spacing=spacing, sigma=sigma, scale=scale,
-        noise=noise, phasing=phasing, decay=decay,
-        asymmetry=asymmetry, dye_scaling=dye_scaling,
-        crosstalk=crosstalk, baseline_drift=baseline_drift, smooth=smooth,
-    )
+        ab1_path = os.path.join(output_dir, f"{rec_name}.ab1")
+        png_path = os.path.join(output_dir, f"{rec_name}.png")
 
-    # Write AB1
-    write_ab1(ab1_path, traces, base_calls, peak_positions,
-              sample_name=sample_name, quality_scores=quality_scores)
-    print(f"  AB1 written: {ab1_path}")
+        print(f"  [{idx+1}/{n_records}] {rec_name}: {len(seq)} bp")
 
-    # Write PNGs (optional)
-    png_paths = []
-    if not no_plot:
-        png_paths = plot_chromatogram(traces, base_calls, peak_positions, png_path,
-                                     title=f"{sample_name} Chromatogram")
-        for p in png_paths:
-            print(f"  PNG written: {p}")
+        # Generate base frequencies from sequence
+        base_freq = sequence_to_base_frequencies(seq)
 
-    return ab1_path, png_paths
+        # Generate traces
+        traces, base_calls, peak_positions, quality_scores = generate_traces(
+            base_freq, spacing=spacing, sigma=sigma, scale=scale,
+            noise=noise, phasing=phasing, decay=decay,
+            asymmetry=asymmetry, dye_scaling=dye_scaling,
+            crosstalk=crosstalk, baseline_drift=baseline_drift, smooth=smooth,
+        )
+
+        # Write AB1
+        write_ab1(ab1_path, traces, base_calls, peak_positions,
+                  sample_name=rec_name, quality_scores=quality_scores)
+        print(f"    AB1: {ab1_path}")
+        all_ab1_paths.append(ab1_path)
+
+        # Write PNGs (optional)
+        if not no_plot:
+            pngs = plot_chromatogram(traces, base_calls, peak_positions, png_path,
+                                     title=f"{rec_name} Chromatogram")
+            for p in pngs:
+                print(f"    PNG: {p}")
+            all_png_paths.extend(pngs)
+
+    if n_records > 1:
+        print(f"  Total: {n_records} AB1 files generated")
+
+    return all_ab1_paths, all_png_paths
 
 
 def plot_ab1_region(ab1_path, output_path, start=None, end=None,

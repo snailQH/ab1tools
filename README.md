@@ -1,5 +1,10 @@
 # ab1tools
 
+[![CI](https://github.com/snailQH/ab1tools/actions/workflows/ci.yml/badge.svg)](https://github.com/snailQH/ab1tools/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/docker/v/snailqh/ab1tools?label=Docker%20Hub&color=blue)](https://hub.docker.com/r/snailqh/ab1tools)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/snailQH/ab1tools/blob/main/LICENSE)
+[![Visitors](https://api.visitorbadge.io/api/visitors?path=https%3A%2F%2Fgithub.com%2FsnailQH%2Fab1tools&label=Visitors&labelColor=%23697689&countColor=%23263759)](https://github.com/snailQH/ab1tools)
+
 **The comprehensive toolkit for AB1 chromatogram files** — generate, visualize, analyze, convert, compare, trim, and extract. Like [samtools](https://github.com/samtools/samtools) for BAM and [bedtools](https://github.com/arq5x/bedtools2) for BED, ab1tools fills the ecosystem gap for the AB1/ABIF chromatogram format.
 
 ab1tools bridges next-generation sequencing (NGS) data with the Sanger chromatogram ecosystem. It converts BAM alignments from **any sequencing platform** (Illumina, Oxford Nanopore, PacBio, Ion Torrent, etc.) into realistic 4-channel AB1 files compatible with **SnapGene**, **Chromas**, **FinchTV**, and **ApE**.
@@ -28,9 +33,20 @@ Dependencies: pysam, numpy, matplotlib, biopython (Python >= 3.9)
 
 ### 3.1 `from-seq` — Generate AB1 from FASTA/FASTQ (no BAM required)
 
+Supports **multi-record files** — if input contains multiple sequences (e.g., multi-contig assembly), generates one AB1 per record automatically.
+
 ```bash
+# Single sequence
 ab1tools from-seq sequence.fasta -o output/
 ab1tools from-seq consensus.fastq -o output/ --name my_sample
+
+# Multi-contig assembly (e.g., Flye/Canu/SPAdes output)
+ab1tools from-seq assembly.fasta -o output/
+# → Generates: contig_1.ab1, contig_2.ab1, contig_3.ab1, ...
+
+# Multi-contig with name prefix
+ab1tools from-seq assembly.fasta -o output/ --name my_assembly
+# → Generates: my_assembly_contig_1.ab1, my_assembly_contig_2.ab1, ...
 ```
 
 ### 3.2 `single` — Convert a single BAM + consensus sample
