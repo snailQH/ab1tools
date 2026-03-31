@@ -19,7 +19,7 @@ from ab1tools.hetero import (
     DEFAULT_MINOR_FREQ, DEFAULT_FLANKING,
 )
 from ab1tools.variant_caller import (
-    VariantCaller, write_variants_csv, write_variants_vcf,
+    VariantCaller, IndelDetector, write_variants_csv, write_variants_vcf,
     subtract_control,
 )
 
@@ -928,6 +928,7 @@ def trim_ab1(ab1_path, output_path=None, quality_threshold=20, min_length=50):
 def call_ab1_variants(ab1_path, output_path=None, output_format="csv",
                       min_threshold=0.05, sensitivity=0.5, prior=0.01,
                       window_size=5, control_path=None,
+                      detect_indels=False, max_indel_size=20,
                       plot=False, dpi=150):
     """Run SDVC variant calling on an AB1 file.
 
@@ -940,6 +941,8 @@ def call_ab1_variants(ab1_path, output_path=None, output_format="csv",
         prior: Bayesian prior for variant (default 0.01)
         window_size: multi-position consistency window (default 5)
         control_path: path to matched control AB1 file (Mode 2). None = Mode 1.
+        detect_indels: if True, also run indel detection (default False)
+        max_indel_size: maximum indel size to detect (default 20)
         plot: if True, generate annotated chromatogram PNG with variant highlights
         dpi: PNG resolution
     """
@@ -988,6 +991,26 @@ def call_ab1_variants(ab1_path, output_path=None, output_format="csv",
         print(f"    pos {v['pos_1based']}: {v['major_base']}→{v['minor_base']} "
               f"({freq_str}) conf={conf_str}")
 
+    # Indel detection (optional)
+    indels = []
+    if detect_indels:
+        from ab1tools.variant_caller import IndelDetector
+        # Use original traces for indel detection (not control-subtracted)
+        orig_traces, orig_calls, orig_peaks, _ = read_ab1(ab1_path)
+        detector = IndelDetector(
+            orig_traces, orig_peaks, orig_calls,
+            max_indel_size=max_indel_size,
+        )
+        indels = detector.detect_indels()
+        if indels:
+            print(f"  Indels detected: {len(indels)}")
+            for indel in indels:
+                size_str = f"{indel['indel_size']:+d}bp" if indel['indel_size'] != 0 else "unknown"
+                print(f"    pos {indel['break_pos_1based']}: {indel['type']} ({size_str}) "
+                      f"aberrant={indel['aberrant_after']*100:.1f}% conf={indel['confidence']:.3f}")
+        else:
+            print(f"  Indels detected: 0")
+
     # Optional annotated plot
     if plot:
         from ab1tools.hetero import get_hetero_windows
@@ -1001,7 +1024,7 @@ def call_ab1_variants(ab1_path, output_path=None, output_format="csv",
             )
             print(f"  Plot: {png_path}")
 
-    return all_results, variants
+    return all_results, variants, indels
 
 
 def find_samples(analysis_dir):
@@ -1144,6 +1167,10 @@ def main():
                       help="Multi-position consistency window size (default: 5)")
     call.add_argument("--control", default=None,
                       help="Control AB1 file for enhanced detection (Mode 2, LOD <1%%)")
+    call.add_argument("--indel", action="store_true", default=False,
+                      help="Also detect insertions/deletions from trace signal patterns")
+    call.add_argument("--max-indel-size", type=int, default=20,
+                      help="Maximum indel size to detect (default: 20)")
     call.add_argument("--plot", action="store_true", default=False,
                       help="Generate annotated chromatogram PNG with variant highlights")
     call.add_argument("--dpi", type=int, default=150,
@@ -1264,6 +1291,8 @@ def main():
             prior=args.prior,
             window_size=args.window_size,
             control_path=args.control,
+            detect_indels=args.indel,
+            max_indel_size=args.max_indel_size,
             plot=args.plot, dpi=args.dpi,
         )
         print("Done!")

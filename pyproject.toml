@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ab1tools"
-version = "2.0.0"
+version = "2.2.0"
 description = "Comprehensive toolkit for AB1 chromatogram files: generate from any NGS platform, visualize, analyze variants (SDVC), convert, compare, trim, and extract regions"
 readme = "README.md"
 license = {text = "MIT"}

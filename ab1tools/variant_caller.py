@@ -375,6 +375,195 @@ class VariantCaller:
         return [r for r in self.call_variants() if r["is_variant"]]
 
 
+class IndelDetector:
+    """Detect insertions and deletions from chromatogram trace data.
+
+    Indels in heterozygous samples cause the two alleles to become out
+    of phase downstream of the indel site. This manifests as:
+    - Sudden increase in "aberrant" (non-dominant) signal after the break point
+    - The downstream signal is a superposition of two shifted traces
+
+    The algorithm:
+    1. Compute per-position aberrant signal fraction (non-dominant channels)
+    2. Identify the break point where aberrant fraction suddenly increases
+    3. Estimate indel size by testing different shift offsets
+    4. Score each candidate indel by signal coherence after deconvolution
+
+    This approach is inspired by TIDE (Brinkman et al., 2014) but operates
+    without a control trace by using the upstream region as self-reference.
+
+    Parameters
+    ----------
+    traces : dict
+        Trace data {"A","C","G","T" → numpy arrays}.
+    peak_positions : list of int
+        Peak center positions.
+    base_calls : str
+        Called base sequence.
+    max_indel_size : int
+        Maximum indel size to test (default 20).
+    aberrant_threshold : float
+        Minimum aberrant signal fraction to consider a break point (default 0.15).
+    """
+
+    def __init__(self, traces, peak_positions, base_calls,
+                 max_indel_size=20, aberrant_threshold=0.15):
+        self.traces = traces
+        self.peaks = list(peak_positions)
+        self.base_calls = base_calls
+        self.max_indel = max_indel_size
+        self.aberrant_threshold = aberrant_threshold
+        self.n_bases = len(base_calls)
+
+        first_base = next(iter(traces))
+        self.trace_len = len(traces[first_base])
+
+    def _get_peak_signal(self, base, center, window=3):
+        arr = self.traces[base]
+        lo = max(0, center - window)
+        hi = min(self.trace_len, center + window + 1)
+        if lo >= hi:
+            return 0.0
+        return float(np.max(arr[lo:hi]))
+
+    def _aberrant_fraction(self, pos_idx):
+        """Compute fraction of signal NOT from the dominant base at position."""
+        if pos_idx >= len(self.peaks):
+            return 0.0
+        center = self.peaks[pos_idx]
+        signals = {}
+        for base in BASES:
+            signals[base] = self._get_peak_signal(base, center)
+        total = sum(signals.values())
+        if total == 0:
+            return 0.0
+        dominant = max(signals.values())
+        return 1.0 - (dominant / total)
+
+    def detect_indels(self):
+        """Detect insertions and deletions from trace signal patterns.
+
+        Returns
+        -------
+        list of dict
+            Each detected indel contains:
+            - break_pos : int — position where indel starts (0-based)
+            - indel_size : int — negative for deletion, positive for insertion
+            - aberrant_before : float — mean aberrant fraction before break
+            - aberrant_after : float — mean aberrant fraction after break
+            - confidence : float — detection confidence (0-1)
+            - type : str — "deletion" or "insertion"
+        """
+        if self.n_bases < 50:
+            return []  # too short for reliable indel detection
+
+        # Step 1: Compute aberrant signal fraction at each position
+        aberrant = np.array([self._aberrant_fraction(i) for i in range(self.n_bases)])
+
+        # Step 2: Find break point(s) — position where aberrant signal jumps
+        # Use a sliding window to find the maximum change point
+        window = 10
+        candidates = []
+
+        for i in range(window, self.n_bases - window):
+            before = np.mean(aberrant[max(0, i-window):i])
+            after = np.mean(aberrant[i:min(self.n_bases, i+window)])
+            delta = after - before
+
+            if delta > self.aberrant_threshold and after > 0.2:
+                candidates.append({
+                    'pos': i,
+                    'delta': delta,
+                    'before': before,
+                    'after': after,
+                })
+
+        if not candidates:
+            return []
+
+        # Step 3: Merge nearby candidates (keep the one with highest delta)
+        merged = []
+        candidates.sort(key=lambda x: -x['delta'])
+        used = set()
+        for c in candidates:
+            if any(abs(c['pos'] - u) < window for u in used):
+                continue
+            merged.append(c)
+            used.add(c['pos'])
+
+        # Step 4: For each break point, estimate indel size
+        results = []
+        for bp in merged:
+            pos = bp['pos']
+
+            # Try different indel sizes and score by downstream coherence
+            best_size = 0
+            best_score = 0
+
+            # Get spacing between peaks
+            if len(self.peaks) > 1:
+                spacing = self.peaks[1] - self.peaks[0]
+            else:
+                spacing = 10
+
+            for size in range(-self.max_indel, self.max_indel + 1):
+                if size == 0:
+                    continue
+
+                # Score: how well does shifting the downstream trace by 'size'
+                # positions improve signal coherence?
+                score = 0
+                n_scored = 0
+
+                for j in range(pos + 5, min(pos + 30, self.n_bases)):
+                    if j >= len(self.peaks):
+                        break
+
+                    center = self.peaks[j]
+                    # Original dominant signal
+                    called = self.base_calls[j] if j < len(self.base_calls) else 'N'
+                    if called not in BASES:
+                        continue
+                    original_signal = self._get_peak_signal(called, center)
+
+                    # Shifted position signal
+                    shifted_center = center + size * spacing
+                    if 0 <= shifted_center < self.trace_len:
+                        # What base would we expect at the shifted position?
+                        shifted_idx = j + size if size < 0 else j - size
+                        if 0 <= shifted_idx < len(self.base_calls):
+                            shifted_base = self.base_calls[shifted_idx]
+                            if shifted_base in BASES:
+                                shifted_signal = self._get_peak_signal(
+                                    shifted_base, shifted_center)
+                                score += shifted_signal
+                                n_scored += 1
+
+                if n_scored > 0:
+                    avg_score = score / n_scored
+                    if avg_score > best_score:
+                        best_score = avg_score
+                        best_size = size
+
+            # Compute confidence from aberrant signal strength
+            confidence = min(bp['delta'] * 2, 1.0)
+
+            indel_type = "deletion" if best_size < 0 else "insertion" if best_size > 0 else "unknown"
+
+            results.append({
+                'break_pos_0based': pos,
+                'break_pos_1based': pos + 1,
+                'indel_size': best_size,
+                'type': indel_type,
+                'aberrant_before': round(bp['before'], 4),
+                'aberrant_after': round(bp['after'], 4),
+                'aberrant_delta': round(bp['delta'], 4),
+                'confidence': round(confidence, 4),
+            })
+
+        return results
+
+
 def subtract_control(sample_traces, control_traces):
     """Subtract matched control trace from sample to enhance variant detection.
 
