@@ -66,15 +66,18 @@ def write_ab1(filename, traces, base_calls, peak_positions, sample_name="Sample"
     # LANE1: lane number = 1 (inline, 2 bytes)
     items.append((b"LANE", 1, ELEM_SHORT, 2, 1, struct.pack(">h", 1)))
 
-    # PBAS1: base calls (tag number 1 to match hyraxAbif)
+    # PBAS1 + PBAS2: base calls (both tags for maximum compatibility)
+    # PBAS1 = original basecalls, PBAS2 = edited basecalls
+    # Tracy requires PBAS2; real ABI instruments write both
     calls_bytes = base_calls.encode("ascii")
     items.append((b"PBAS", 1, ELEM_CHAR, 1, len(calls_bytes), calls_bytes))
+    items.append((b"PBAS", 2, ELEM_CHAR, 1, len(calls_bytes), calls_bytes))
 
-    # PCON2: quality/confidence values
-    # Stored as ELEM_CHAR (type 2) for Biopython compatibility
+    # PCON1 + PCON2: quality/confidence values (both tags)
     if quality_scores is None:
         quality_scores = [40] * len(base_calls)
     pcon = bytes(min(q, 255) for q in quality_scores)
+    items.append((b"PCON", 1, ELEM_CHAR, 1, len(pcon), pcon))
     items.append((b"PCON", 2, ELEM_CHAR, 1, len(pcon), pcon))
 
     # PDMF1/2: mobility file name (required by some viewers)
@@ -83,9 +86,10 @@ def write_ab1(filename, traces, base_calls, peak_positions, sample_name="Sample"
     items.append((b"PDMF", 1, ELEM_PSTRING, 1, len(pdmf), pdmf))
     items.append((b"PDMF", 2, ELEM_PSTRING, 1, len(pdmf), pdmf))
 
-    # PLOC1: peak positions (tag number 1 to match hyraxAbif)
+    # PLOC1 + PLOC2: peak positions (both tags for Tracy compatibility)
     ploc = np.array(peak_positions, dtype=">u2")  # big-endian uint16
     items.append((b"PLOC", 1, ELEM_SHORT, 2, len(ploc), ploc.tobytes()))
+    items.append((b"PLOC", 2, ELEM_SHORT, 2, len(ploc), ploc.tobytes()))
 
     # S/N%1: signal-to-noise ratios per channel (G, A, T, C)
     # Compute from actual trace data instead of using hardcoded values
