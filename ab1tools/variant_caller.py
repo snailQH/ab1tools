@@ -378,19 +378,22 @@ class VariantCaller:
 class IndelDetector:
     """Detect insertions and deletions from chromatogram trace data.
 
-    Indels in heterozygous samples cause the two alleles to become out
-    of phase downstream of the indel site. This manifests as:
-    - Sudden increase in "aberrant" (non-dominant) signal after the break point
-    - The downstream signal is a superposition of two shifted traces
+    In heterozygous indel samples, the two alleles go out of phase downstream
+    of the indel site. The observed trace is a superposition of:
+      - Allele 1: wild-type signal (aligned to reference positions)
+      - Allele 2: mutant signal (shifted by indel_size positions)
 
-    The algorithm:
-    1. Compute per-position aberrant signal fraction (non-dominant channels)
-    2. Identify the break point where aberrant fraction suddenly increases
-    3. Estimate indel size by testing different shift offsets
-    4. Score each candidate indel by signal coherence after deconvolution
+    Algorithm (trace decomposition approach):
+    1. Compute per-position aberrant signal fraction to find break point(s)
+    2. For each break point, test indel sizes from -max to +max:
+       a. Model the downstream signal as: observed ≈ α·reference + β·shifted_reference
+       b. For each shift, compute the Pearson correlation between the modeled
+          and observed 4-channel signal in the decomposition window
+       c. The shift with highest correlation = estimated indel size
+    3. Estimate allelic fraction from the decomposition weights
 
-    This approach is inspired by TIDE (Brinkman et al., 2014) but operates
-    without a control trace by using the upstream region as self-reference.
+    Inspired by TIDE (Brinkman et al., 2014) but operates without a control
+    trace, using the upstream/reference base calls as self-reference.
 
     Parameters
     ----------
@@ -401,24 +404,35 @@ class IndelDetector:
     base_calls : str
         Called base sequence.
     max_indel_size : int
-        Maximum indel size to test (default 20).
+        Maximum indel size to test (default 30).
     aberrant_threshold : float
-        Minimum aberrant signal fraction to consider a break point (default 0.15).
+        Minimum aberrant signal jump to identify a break point (default 0.15).
+    decomp_window : int
+        Number of bases downstream of break point to use for decomposition (default 40).
     """
 
     def __init__(self, traces, peak_positions, base_calls,
-                 max_indel_size=20, aberrant_threshold=0.15):
+                 max_indel_size=30, aberrant_threshold=0.15, decomp_window=40):
         self.traces = traces
         self.peaks = list(peak_positions)
         self.base_calls = base_calls
         self.max_indel = max_indel_size
         self.aberrant_threshold = aberrant_threshold
+        self.decomp_window = decomp_window
         self.n_bases = len(base_calls)
 
         first_base = next(iter(traces))
         self.trace_len = len(traces[first_base])
 
+        # Compute peak spacing
+        if len(self.peaks) > 1:
+            spacings = [self.peaks[i+1] - self.peaks[i] for i in range(min(50, len(self.peaks)-1))]
+            self.spacing = int(np.median(spacings))
+        else:
+            self.spacing = 10
+
     def _get_peak_signal(self, base, center, window=3):
+        """Get peak signal height for a base at a trace position."""
         arr = self.traces[base]
         lo = max(0, center - window)
         hi = min(self.trace_len, center + window + 1)
@@ -426,19 +440,80 @@ class IndelDetector:
             return 0.0
         return float(np.max(arr[lo:hi]))
 
-    def _aberrant_fraction(self, pos_idx):
-        """Compute fraction of signal NOT from the dominant base at position."""
-        if pos_idx >= len(self.peaks):
-            return 0.0
+    def _get_signal_vector(self, pos_idx):
+        """Get 4-channel signal vector at a base position. Returns [A,C,G,T]."""
+        if pos_idx >= len(self.peaks) or pos_idx < 0:
+            return np.zeros(4)
         center = self.peaks[pos_idx]
-        signals = {}
-        for base in BASES:
-            signals[base] = self._get_peak_signal(base, center)
-        total = sum(signals.values())
+        return np.array([self._get_peak_signal(b, center) for b in BASES])
+
+    def _aberrant_fraction(self, pos_idx):
+        """Fraction of signal NOT from the dominant base."""
+        sig = self._get_signal_vector(pos_idx)
+        total = sig.sum()
         if total == 0:
             return 0.0
-        dominant = max(signals.values())
-        return 1.0 - (dominant / total)
+        return 1.0 - (sig.max() / total)
+
+    def _expected_signal_for_base(self, base_char):
+        """Return expected normalized signal vector for a given base call."""
+        vec = np.zeros(4)
+        if base_char in BASES:
+            vec[BASES.index(base_char)] = 1.0
+        return vec
+
+    def _decompose_at_shift(self, break_pos, shift):
+        """Score how well a given shift explains the downstream signal.
+
+        For each position j downstream of break_pos:
+          - Allele 1 expects: base_calls[j] (reference)
+          - Allele 2 expects: base_calls[j + shift] (shifted by indel)
+          - Predicted mixed signal: 0.5 * ref_vector + 0.5 * shifted_vector
+          - Compare predicted vs observed using correlation
+
+        Returns (correlation, n_positions_scored).
+        """
+        predicted_signals = []
+        observed_signals = []
+
+        start = break_pos + 3  # skip the immediate break region
+        end = min(break_pos + self.decomp_window, self.n_bases)
+
+        for j in range(start, end):
+            # Observed signal at position j
+            obs = self._get_signal_vector(j)
+            if obs.sum() == 0:
+                continue
+
+            # Reference allele: base at position j
+            ref_base = self.base_calls[j] if j < len(self.base_calls) else 'N'
+            ref_vec = self._expected_signal_for_base(ref_base)
+
+            # Shifted allele: base at position j + shift
+            shifted_idx = j + shift
+            if shifted_idx < 0 or shifted_idx >= len(self.base_calls):
+                continue
+            shifted_base = self.base_calls[shifted_idx]
+            shifted_vec = self._expected_signal_for_base(shifted_base)
+
+            # Predicted mixed signal (50:50 mixture)
+            predicted = 0.5 * ref_vec + 0.5 * shifted_vec
+
+            predicted_signals.append(predicted)
+            observed_signals.append(obs / max(obs.sum(), 1.0))  # normalize observed
+
+        if len(predicted_signals) < 5:
+            return 0.0, 0
+
+        # Compute correlation between predicted and observed signal series
+        pred_flat = np.array(predicted_signals).flatten()
+        obs_flat = np.array(observed_signals).flatten()
+
+        if np.std(pred_flat) < 1e-10 or np.std(obs_flat) < 1e-10:
+            return 0.0, len(predicted_signals)
+
+        corr = float(np.corrcoef(pred_flat, obs_flat)[0, 1])
+        return corr, len(predicted_signals)
 
     def detect_indels(self):
         """Detect insertions and deletions from trace signal patterns.
@@ -447,120 +522,98 @@ class IndelDetector:
         -------
         list of dict
             Each detected indel contains:
-            - break_pos : int — position where indel starts (0-based)
-            - indel_size : int — negative for deletion, positive for insertion
-            - aberrant_before : float — mean aberrant fraction before break
-            - aberrant_after : float — mean aberrant fraction after break
-            - confidence : float — detection confidence (0-1)
-            - type : str — "deletion" or "insertion"
+            - break_pos_0based, break_pos_1based : int
+            - indel_size : int — negative=deletion, positive=insertion
+            - type : str — "deletion", "insertion", or "unknown"
+            - aberrant_before, aberrant_after, aberrant_delta : float
+            - confidence : float — 0-1
+            - decomp_correlation : float — correlation of best-fit model
+            - allelic_fraction : float — estimated fraction of mutant allele
         """
         if self.n_bases < 50:
-            return []  # too short for reliable indel detection
+            return []
 
-        # Step 1: Compute aberrant signal fraction at each position
+        # Step 1: Compute aberrant signal profile
         aberrant = np.array([self._aberrant_fraction(i) for i in range(self.n_bases)])
 
-        # Step 2: Find break point(s) — position where aberrant signal jumps
-        # Use a sliding window to find the maximum change point
+        # Step 2: Find break points (positions where aberrant signal jumps)
         window = 10
         candidates = []
-
         for i in range(window, self.n_bases - window):
             before = np.mean(aberrant[max(0, i-window):i])
             after = np.mean(aberrant[i:min(self.n_bases, i+window)])
             delta = after - before
-
             if delta > self.aberrant_threshold and after > 0.2:
-                candidates.append({
-                    'pos': i,
-                    'delta': delta,
-                    'before': before,
-                    'after': after,
-                })
+                candidates.append({'pos': i, 'delta': delta, 'before': before, 'after': after})
 
         if not candidates:
             return []
 
-        # Step 3: Merge nearby candidates (keep the one with highest delta)
+        # Step 3: Merge nearby candidates
         merged = []
         candidates.sort(key=lambda x: -x['delta'])
         used = set()
         for c in candidates:
-            if any(abs(c['pos'] - u) < window for u in used):
+            if any(abs(c['pos'] - u) < window * 2 for u in used):
                 continue
             merged.append(c)
             used.add(c['pos'])
 
-        # Step 4: For each break point, estimate indel size
+        # Step 4: For each break point, estimate indel size via trace decomposition
         results = []
         for bp in merged:
             pos = bp['pos']
 
-            # Try different indel sizes and score by downstream coherence
+            # Test all possible indel sizes
             best_size = 0
-            best_score = 0
-
-            # Get spacing between peaks
-            if len(self.peaks) > 1:
-                spacing = self.peaks[1] - self.peaks[0]
-            else:
-                spacing = 10
+            best_corr = -1.0
+            shift_scores = {}
 
             for size in range(-self.max_indel, self.max_indel + 1):
                 if size == 0:
                     continue
+                corr, n_scored = self._decompose_at_shift(pos, size)
+                shift_scores[size] = corr
+                if corr > best_corr and n_scored >= 5:
+                    best_corr = corr
+                    best_size = size
 
-                # Score: how well does shifting the downstream trace by 'size'
-                # positions improve signal coherence?
-                score = 0
-                n_scored = 0
+            # Also test shift=0 (no indel, just noisy region)
+            corr_null, _ = self._decompose_at_shift(pos, 0)
 
-                for j in range(pos + 5, min(pos + 30, self.n_bases)):
-                    if j >= len(self.peaks):
-                        break
+            # Only report if the best indel model is substantially better than null
+            if best_corr <= corr_null + 0.05:
+                # Not convincingly an indel — skip
+                continue
 
-                    center = self.peaks[j]
-                    # Original dominant signal
-                    called = self.base_calls[j] if j < len(self.base_calls) else 'N'
-                    if called not in BASES:
-                        continue
-                    original_signal = self._get_peak_signal(called, center)
+            # Estimate allelic fraction from aberrant signal
+            allelic_frac = min(bp['after'] / 0.5, 1.0)  # approximate: 50% max for het
 
-                    # Shifted position signal
-                    shifted_center = center + size * spacing
-                    if 0 <= shifted_center < self.trace_len:
-                        # What base would we expect at the shifted position?
-                        shifted_idx = j + size if size < 0 else j - size
-                        if 0 <= shifted_idx < len(self.base_calls):
-                            shifted_base = self.base_calls[shifted_idx]
-                            if shifted_base in BASES:
-                                shifted_signal = self._get_peak_signal(
-                                    shifted_base, shifted_center)
-                                score += shifted_signal
-                                n_scored += 1
+            confidence = min(bp['delta'] * 2, 1.0) * max(best_corr, 0)
 
-                if n_scored > 0:
-                    avg_score = score / n_scored
-                    if avg_score > best_score:
-                        best_score = avg_score
-                        best_size = size
-
-            # Compute confidence from aberrant signal strength
-            confidence = min(bp['delta'] * 2, 1.0)
-
-            indel_type = "deletion" if best_size < 0 else "insertion" if best_size > 0 else "unknown"
+            # Sign convention: decomposition shift > 0 means the secondary allele
+            # reads ahead (bases deleted), shift < 0 means reads behind (bases inserted)
+            # Invert for standard indel notation: negative = deletion, positive = insertion
+            reported_size = -best_size
+            indel_type = "deletion" if reported_size < 0 else "insertion" if reported_size > 0 else "unknown"
 
             results.append({
                 'break_pos_0based': pos,
                 'break_pos_1based': pos + 1,
-                'indel_size': best_size,
+                'indel_size': reported_size,
+                'decomp_shift': best_size,
                 'type': indel_type,
                 'aberrant_before': round(bp['before'], 4),
                 'aberrant_after': round(bp['after'], 4),
                 'aberrant_delta': round(bp['delta'], 4),
                 'confidence': round(confidence, 4),
+                'decomp_correlation': round(best_corr, 4),
+                'null_correlation': round(corr_null, 4),
+                'allelic_fraction': round(allelic_frac, 2),
             })
 
+        # Sort by confidence
+        results.sort(key=lambda x: -x['confidence'])
         return results
 
 
